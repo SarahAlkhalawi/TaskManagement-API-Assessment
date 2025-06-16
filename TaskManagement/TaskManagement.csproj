@@ -25,9 +25,4 @@
 	  <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.0.3" />	  
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include=".github\workflows\cd.yml" />
-    <None Include=".github\workflows\ci.yml" />
-  </ItemGroup>
-
 </Project>
