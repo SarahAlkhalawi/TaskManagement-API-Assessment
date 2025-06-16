@@ -1,0 +1,115 @@
+name: taskmanagement-cd
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: eu-north-1
+  EB_APPLICATION_NAME: TaskManagement-API
+  EB_ENVIRONMENT_NAME: TaskManagement-API-env-test
+
+jobs:
+  linting:
+    runs-on: ubuntu-latest
+    steps:
+    - name: TaskManagement-API
+      uses: actions/checkout@v3
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: "8.0"
+    - name: Install dependencies
+      run: dotnet restore TaskManagement.csproj
+    - name: Run code formatting check
+      run: |
+        dotnet tool install -g dotnet-format
+        dotnet format --verify-no-changes --verbosity diagnostic
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
+        ports:
+          - 1433:1433
+    steps:
+    - name: TaskManagement-API
+      uses: actions/checkout@v3
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: "8.0"
+    - name: Install dependencies
+      run: dotnet restore TaskManagement.csproj
+    - name: Build application
+      run: dotnet build TaskManagement.csproj --no-restore --configuration Release
+    - name: Run tests
+      env:
+        ConnectionStrings__TaskManagementConnection: ${{ secrets.TEST_CONNECTION_STRING }}
+        Jwt__Key: ${{ secrets.TEST_JWT_KEY }}
+        Jwt__Issuer: ${{ secrets.TEST_JWT_ISSUER }}
+        Jwt__Audience: ${{ secrets.TEST_JWT_AUDIENCE }}
+      run: dotnet test --no-build --configuration Release --verbosity normal
+
+  build-and-deploy:
+    needs: [linting, test]
+    runs-on: ubuntu-latest
+    steps:
+    - name: TaskManagement-API
+      uses: actions/checkout@v3
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: "8.0"
+    - name: Install dependencies
+      run: dotnet restore TaskManagement.csproj
+    - name: Build application
+      run: dotnet build TaskManagement.csproj --no-restore --configuration Release
+    - name: Publish application
+      run: dotnet publish TaskManagement.csproj -c Release -o ./publish
+    - name: Create deployment package
+      run: |
+        cd publish
+        zip -r ../deployment-package.zip .
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    - name: Deploy to Elastic Beanstalk
+      uses: einaregilsson/beanstalk-deploy@v22
+      with:
+        aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        application_name: ${{ env.EB_APPLICATION_NAME }}
+        environment_name: ${{ env.EB_ENVIRONMENT_NAME }}
+        version_label: ${{ github.sha }}
+        region: ${{ env.AWS_REGION }}
+        deployment_package: deployment-package.zip
+        wait_for_deployment: true
+
+  health-check:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    steps:
+    - name: Wait for deployment
+      run: sleep 60
+    - name: Health check
+      run: |
+        response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.APP_URL }}/health)
+        if [ $response -eq 200 ]; then
+          echo "Health check passed"
+        else
+          echo "Health check failed with status: $response"
+          exit 1
+        fi
+    - name: Test API endpoints
+      run: |
+        curl -f ${{ secrets.APP_URL }}/WeatherForecast
+        curl -f ${{ secrets.APP_URL }}/swagger/index.html
